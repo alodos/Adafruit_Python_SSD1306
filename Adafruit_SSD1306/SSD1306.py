@@ -79,6 +79,9 @@ class SSD1306Base(object):
         self.height = height
         self._pages = height//8
         self._buffer = [0]*(width*self._pages)
+        self._vertical_offset = None
+        self._mux_ratio = None
+        self._start_line = 0
         # Default to platform GPIO if not provided.
         self._gpio = gpio
         if self._gpio is None:
@@ -139,15 +142,16 @@ class SSD1306Base(object):
             control = 0x40   # Co = 0, DC = 0
             self._i2c.write8(control, c)
 
-    def begin(self, vccstate=SSD1306_SWITCHCAPVCC):
+    def begin(self, init=True, vccstate=SSD1306_SWITCHCAPVCC):
         """Initialize display."""
         # Save vcc state.
         self._vccstate = vccstate
-        # Reset and initialize display.
-        self.reset()
-        self._initialize()
-        # Turn on the display.
-        self.command(SSD1306_DISPLAYON)
+        if init:
+            # Reset and initialize display.
+            self.reset()
+            self._initialize()
+            # Turn on the display.
+            self.command(SSD1306_DISPLAYON)
 
     def reset(self):
         """Reset the display."""
@@ -180,6 +184,49 @@ class SSD1306Base(object):
             for i in range(0, len(self._buffer), 16):
                 control = 0x40   # Co = 0, DC = 0
                 self._i2c.writeList(control, self._buffer[i:i+16])
+
+    def displaypart(self, col_start, col_end, page_start, page_end):
+        """Write part of display buffer to physical display."""
+
+        if (col_start == 0) and (col_end == self.width-1) and (page_start == 0) and (page_end == self._pages-1):
+            self.display();
+
+        # Check for correct values
+        if col_start < 0 or col_start >= self.width:
+            raise ValueError('Start column must be greater then zero and less than width.')
+        if col_end < col_start or col_end >= self.width:
+            raise ValueError('End column must be greater or equal then start column and less than width.')
+        if page_start < 0 or page_start >= self._pages:
+            raise ValueError('Start page must be greater then zero and less than pages count.')
+        if page_end < page_start or page_end >= self._pages:
+            raise ValueError('End page must be greater or equal then start page and less than pages count.')
+
+        # Prepare part of buffer
+        video_buffer_part = [0]*((page_end - page_start + 1) * (col_end - col_start + 1))
+        j = 0
+        lenb = len(self._buffer)
+        for i in range(lenb):
+            if (col_start <= (i % self.width) <= col_end) and (page_start <= (i//self.width) <= page_end):
+                video_buffer_part[j] = self._buffer[i]
+                j = j + 1
+
+        self.command(SSD1306_COLUMNADDR)
+        self.command(col_start)      # Column start address. (0 = reset)
+        self.command(col_end)        # Column end address.
+        self.command(SSD1306_PAGEADDR)
+        self.command(page_start)     # Page start address. (0 = reset)
+        self.command(page_end)       # Page end address.
+
+        # Write buffer data.
+        if self._spi is not None:
+            # Set DC high for data.
+            self._gpio.set_high(self._dc)
+            # Write buffer.
+            self._spi.write(video_buffer_part)
+        else:
+            for i in range(0, len(video_buffer_part), 16):
+                control = 0x40   # Co = 0, DC = 0
+                self._i2c.writeList(control, video_buffer_part[i:i+16])
 
     def image(self, image):
         """Set buffer to value of Python Imaging Library image.  The image should
@@ -233,6 +280,214 @@ class SSD1306Base(object):
             else:
                 contrast = 0xCF
 
+    def deactivate_scroll(self):
+        """
+        Deactivate scroll (2Eh)
+
+        This command stops the motion of scrolling. After sending 0x2E command to deactivate the scrolling action,the ram
+        data needs to be rewritten.
+        """
+        self.command(SSD1306_DEACTIVATE_SCROLL)                    # 0x2E
+        self.display()
+
+    def activate_scroll(self):
+        """
+        Activate Scroll (2Fh)
+
+        This command starts the motion of scrolling and should only be issued after the scroll setup parameters have
+        been defined by the scrolling setup commands :26h/27h/29h/2Ah . The setting in the last scrolling setup command
+        overwrites the setting in the previous scrolling setup commands.
+
+        The following actions are prohibited after the scrolling is activated
+            1.  RAM access (Data write or read)
+            2.  Changing the horizontal scroll setup parameters
+        """
+        self.command(SSD1306_ACTIVATE_SCROLL)                    # 0x2F
+
+    def horizontal_scroll_setup(self, direction, start_page, end_page, speed):
+        """
+        Horizontal Scroll Setup (26h/27h)
+
+        This command consists of consecutive bytes to set up the horizontal scroll parameters and determines the
+        scrolling start page, end page and scrolling speed. Before issuing this command the horizontal scroll must be
+        deactivated (2Eh). Otherwise, RAM content may be corrupted.
+
+        :param direction:   0 - Right Horizontal Scroll
+                            1 - Left Horizontal Scroll
+        :param start_page:  Define start page address - PAGE0 ~ PAGE{PAGES-1}
+        :param end_page:    Define end page address - PAGE0 ~ PAGE{PAGES-1}
+        :param speed:       Set time interval between each roll step in terms of frame frequency:
+                                0 - 5 frames
+                                1 - 64 frames
+                                2 - 128 frames
+                                3 - 256 frames
+                                4 - 3 frames
+                                5 - 4 frames
+                                6 - 25 frames
+                                7 - 2 frames
+        :raise ValueError: Start page cannot be larger than end page
+        """
+        self.deactivate_scroll()
+
+        # Check for correct values
+        self.check_int(direction, 0, 1)
+        self.check_int(start_page, 0, self._pages-1)
+        self.check_int(end_page, 0, self._pages-1)
+        self.check_int(speed, 0, 7)
+
+        # Check if start_page is bigger than end_page
+        if start_page > end_page:
+            raise ValueError("Start page address cannot be bigger than end page address")
+
+        self.command(SSD1306_LEFT_HORIZONTAL_SCROLL if direction else SSD1306_RIGHT_HORIZONTAL_SCROLL)  # 0x26/0x27
+        self.command(0x00)           # Dummy byte (Set as 00h)
+        self.command(start_page)     # Column start address. (0 = reset)
+        self.command(speed)          # Set time interval between each scroll step in terms of frame frequency.
+        self.command(end_page)       # Column end address.
+        self.command(0x00)           # Dummy byte (Set as 00h)
+        self.command(0xFF)           # Dummy byte (Set as FFh)
+
+    def vertical_and_horizontal_scroll_setup(self, direction, start_page, end_page, speed, vertical_offset):
+        """
+         Continuous Vertical and Horizontal Scroll Setup (29h/2Ah)
+
+        This command consists of 6 consecutive bytes to set up the continuous vertical scroll parameters and determines
+        the scrolling start page, end page, scrolling speed and vertical scrolling offset.
+
+        The bytes B[2:0], C[2:0] and D[2:0] of command 29h/2Ah are for the setting of the continuous horizontal
+        scrolling. The byte E[5:0] is for the setting of the continuous vertical scrolling offset. All these bytes
+        together are for the setting of continuous diagonal (horizontal + vertical) scrolling. If the vertical
+        scrolling offset byte E[5:0] is set to zero, then only horizontal scrolling is performed (like command 26/27h).
+
+        Before issuing this command the scroll must be deactivated (2Eh). Otherwise, RAM content may be corrupted.
+
+        :param direction:       0 - Vertical and Right Horizontal Scroll
+                                1 - Vertical and Left Horizontal Scroll
+        :param start_page:      Define start page address - PAGE0 ~ PAGE{PAGES-1}
+        :param end_page:        Define end page address -   PAGE0 ~ PAGE{PAGES-1}
+        :param speed:           Set time interval between each roll step in terms of frame frequency:
+                                0 - 5 frames
+                                1 - 64 frames
+                                2 - 128 frames
+                                3 - 256 frames
+                                4 - 3 frames
+                                5 - 4 frames
+                                6 - 25 frames
+                                7 - 2 frames
+        :param vertical_offset: Vertical scrolling offset e.g.
+                                    01h refer to offset = 1 row
+                                    3Fh refer to offset = 63 rows
+        :raise ValueError:      Start page cannot be larger than end page
+        """
+        self.deactivate_scroll()
+
+        # Check for correct values
+        self.check_int(direction, 0, 1)
+        self.check_int(start_page, 0, self._pages-1)
+        self.check_int(end_page, 0, self._pages-1)
+        self.check_int(speed, 0, 7)
+        self.check_int(vertical_offset, 0, self.height-1)
+
+        self._vertical_offset = vertical_offset
+
+        # Check if start_page is bigger than end_page
+        if start_page > end_page:
+            raise ValueError("Start page address cannot be bigger than end page address")
+
+        self.command(SSD1306_VERTICAL_AND_LEFT_HORIZONTAL_SCROLL if direction else SSD1306_VERTICAL_AND_RIGHT_HORIZONTAL_SCROLL)  # 0x29/0x2A
+        self.command(0x00)             # Dummy byte (Set as 00h)
+        self.command(start_page)       # Page start address. (0 = reset)
+        self.command(speed)            # Set time interval between each scroll step in terms of frame frequency.
+        self.command(end_page)         # Page end address.
+        self.command(vertical_offset)  # Vertical scrolling offset
+
+    def set_vertical_scroll_area(self, start, count):
+
+        """
+        Set Vertical Scroll Area(A3h)
+
+        This command consists of 3 consecutive bytes to set up the vertical scroll area. For the continuous vertical
+        scroll function (command 29/2Ah), the number of rows that in vertical scrolling can be set smaller or equal to
+        the MUX ratio.
+
+        :param start:       Set No. of rows in top fixed area. The No. of rows in top fixed area is referenced to the
+                            top of the GDDRAM (i.e. row 0).[RESET =0]
+
+        :param count:       Set No. of rows in scroll area. This is the number of rows to be used for vertical
+                            scrolling. The scroll area starts in the first row below the top fixed area. [RESET = 64]
+
+        :raise ValueError:
+        """
+        self.check_int(start, 0, self.height-1)
+        self.check_int(count, 0, self.height-1)
+
+        if start + count > self._mux_ratio:
+            raise ValueError("Start + Count cannot be larger than MUX ratio")
+
+        if count > self._mux_ratio:
+            raise ValueError("Count cannot be larger than MUX ratio")
+
+        if not self._vertical_offset:
+            raise ValueError("Vertical and horizontal scroll must be setup first")
+
+        if not (self._vertical_offset < count):
+            raise ValueError("Count cannot be smaller than vertical offset")
+
+        if not (self._start_line < count):
+            raise ValueError("Display start line must be smaller than Count")
+
+        self.command(SSD1306_SET_VERTICAL_SCROLL_AREA)                    # 0xA3
+        self.command(start)            # No. of rows in top fixed area. (0 = reset)
+        self.command(count)            # No. of rows in scroll area. (64 = reset)
+
+    def set_multiplex_ratio(self, ratio):
+        """
+        Set Multiplex Ratio (A8h)
+
+        This command switches the default 63 multiplex mode to any multiplex ratio, ranging from 16 to 63 (for 128x64 displays). The output
+        pads COM0~COM63 will be switched to the corresponding COM signal.
+
+        :param ratio:   Set MUX ratio to N+1 MUX
+                        N=A[5:0] : from 16MUX to 64MUX,
+                        RESET= 111111b (i.e. 63d, 64MUX)
+                        A[5:0] from 0 to 14 are invalid entry.
+        """
+        self.check_int(ratio, 15, self.height-1)
+        self._mux_ratio = ratio
+
+        self.command(SSD1306_SETMULTIPLEX)                    # 0xA8
+        self.command(ratio)       # Multiplex Ratio. (111111b = reset for 128x64 displays)
+
+    def set_display_start_line(self, start_line):
+        """
+        Set Display Start Line (40h~7Fh)
+
+        This command sets the Display Start Line register to determine starting address of display RAM, by selecting a
+        value from 0 to 63 (for 128x64 displays). With value equal to 0, RAM row 0 is mapped to COM0. With value equal to 1, RAM row 1 is
+        mapped to COM0 and so on.
+
+        :param start_line:  Set display RAM display start line register from 0-(height-1).
+                            Display start line register is reset to 000000b during RESET.
+        """
+        self.check_int(start_line, 0, self.height-1)
+        self._start_line = start_line
+
+        self.command(SSD1306_SETSTARTLINE | start_line)                    # 0x40~7Fh
+
+    @staticmethod
+    def check_int(data, lower_range, upper_range):
+        if lower_range >= upper_range:
+            raise ValueError("Lower range cannot be greater that the upper")
+        if not isinstance(data, int):
+            raise TypeError("Value must be integer")
+        if data > upper_range or data < lower_range:
+            raise ValueError("Invalid value")
+
+    def getHeight(self):
+        return self.height
+
+    def getWidth(self):
+        return self.width
 
 class SSD1306_128_64(SSD1306Base):
     def __init__(self, rst, dc=None, sclk=None, din=None, cs=None, gpio=None,
@@ -241,6 +496,7 @@ class SSD1306_128_64(SSD1306Base):
         # Call base class constructor.
         super(SSD1306_128_64, self).__init__(128, 64, rst, dc, sclk, din, cs,
                                              gpio, spi, i2c_bus, i2c_address, i2c)
+        self._mux_ratio = 0x3F
 
     def _initialize(self):
         # 128x64 pixel specific initialization.
@@ -249,9 +505,11 @@ class SSD1306_128_64(SSD1306Base):
         self.command(0x80)                                  # the suggested ratio 0x80
         self.command(SSD1306_SETMULTIPLEX)                  # 0xA8
         self.command(0x3F)
+        self._mux_ratio = 0x3F
         self.command(SSD1306_SETDISPLAYOFFSET)              # 0xD3
         self.command(0x0)                                   # no offset
         self.command(SSD1306_SETSTARTLINE | 0x0)            # line #0
+        self._start_line = 0
         self.command(SSD1306_CHARGEPUMP)                    # 0x8D
         if self._vccstate == SSD1306_EXTERNALVCC:
             self.command(0x10)
@@ -286,6 +544,7 @@ class SSD1306_128_32(SSD1306Base):
         # Call base class constructor.
         super(SSD1306_128_32, self).__init__(128, 32, rst, dc, sclk, din, cs,
                                              gpio, spi, i2c_bus, i2c_address, i2c)
+        self._mux_ratio = 0x1F
 
     def _initialize(self):
         # 128x32 pixel specific initialization.
@@ -294,9 +553,11 @@ class SSD1306_128_32(SSD1306Base):
         self.command(0x80)                                  # the suggested ratio 0x80
         self.command(SSD1306_SETMULTIPLEX)                  # 0xA8
         self.command(0x1F)
+        self._mux_ratio = 0x1F
         self.command(SSD1306_SETDISPLAYOFFSET)              # 0xD3
         self.command(0x0)                                   # no offset
         self.command(SSD1306_SETSTARTLINE | 0x0)            # line #0
+        self._start_line = 0
         self.command(SSD1306_CHARGEPUMP)                    # 0x8D
         if self._vccstate == SSD1306_EXTERNALVCC:
             self.command(0x10)
@@ -328,6 +589,7 @@ class SSD1306_96_16(SSD1306Base):
         # Call base class constructor.
         super(SSD1306_96_16, self).__init__(96, 16, rst, dc, sclk, din, cs,
                                             gpio, spi, i2c_bus, i2c_address, i2c)
+        self._mux_ratio = 0x0F
 
     def _initialize(self):
         # 128x32 pixel specific initialization.
@@ -336,9 +598,11 @@ class SSD1306_96_16(SSD1306Base):
         self.command(0x60)                                  # the suggested ratio 0x60
         self.command(SSD1306_SETMULTIPLEX)                  # 0xA8
         self.command(0x0F)
+        self._mux_ratio = 0x0F
         self.command(SSD1306_SETDISPLAYOFFSET)              # 0xD3
         self.command(0x0)                                   # no offset
         self.command(SSD1306_SETSTARTLINE | 0x0)            # line #0
+        self._start_line = 0
         self.command(SSD1306_CHARGEPUMP)                    # 0x8D
         if self._vccstate == SSD1306_EXTERNALVCC:
             self.command(0x10)
