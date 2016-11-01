@@ -71,7 +71,7 @@ class SSD1306Base(object):
 
     def __init__(self, width, height, rst, dc=None, sclk=None, din=None, cs=None,
                  gpio=None, spi=None, i2c_bus=None, i2c_address=SSD1306_I2C_ADDRESS,
-                 i2c=None):
+                 i2c=None, i2c_interface=None):
         self._log = logging.getLogger('Adafruit_SSD1306.SSD1306Base')
         self._spi = None
         self._i2c = None
@@ -107,9 +107,9 @@ class SSD1306Base(object):
             self._log.debug('Using hardware I2C with platform I2C provider.')
             import Adafruit_GPIO.I2C as I2C
             if i2c_bus is None:
-                self._i2c = I2C.get_i2c_device(i2c_address)
+                self._i2c = I2C.get_i2c_device(i2c_address, i2c_interface=i2c_interface)
             else:
-                self._i2c = I2C.get_i2c_device(i2c_address, busnum=i2c_bus)
+                self._i2c = I2C.get_i2c_device(i2c_address, busnum=i2c_bus, i2c_interface=i2c_interface)
         # Initialize DC pin if using SPI.
         if self._spi is not None:
             if dc is None:
@@ -492,10 +492,10 @@ class SSD1306Base(object):
 class SSD1306_128_64(SSD1306Base):
     def __init__(self, rst, dc=None, sclk=None, din=None, cs=None, gpio=None,
                  spi=None, i2c_bus=None, i2c_address=SSD1306_I2C_ADDRESS,
-                 i2c=None):
+                 i2c=None, i2c_interface=None):
         # Call base class constructor.
         super(SSD1306_128_64, self).__init__(128, 64, rst, dc, sclk, din, cs,
-                                             gpio, spi, i2c_bus, i2c_address, i2c)
+                                             gpio, spi, i2c_bus, i2c_address, i2c, i2c_interface)
         self._mux_ratio = 0x3F
 
     def _initialize(self):
@@ -540,10 +540,10 @@ class SSD1306_128_64(SSD1306Base):
 class SSD1306_128_32(SSD1306Base):
     def __init__(self, rst, dc=None, sclk=None, din=None, cs=None, gpio=None,
                  spi=None, i2c_bus=None, i2c_address=SSD1306_I2C_ADDRESS,
-                 i2c=None):
+                 i2c=None, i2c_interface=None):
         # Call base class constructor.
         super(SSD1306_128_32, self).__init__(128, 32, rst, dc, sclk, din, cs,
-                                             gpio, spi, i2c_bus, i2c_address, i2c)
+                                             gpio, spi, i2c_bus, i2c_address, i2c, i2c_interface)
         self._mux_ratio = 0x1F
 
     def _initialize(self):
@@ -585,10 +585,10 @@ class SSD1306_128_32(SSD1306Base):
 class SSD1306_96_16(SSD1306Base):
     def __init__(self, rst, dc=None, sclk=None, din=None, cs=None, gpio=None,
                  spi=None, i2c_bus=None, i2c_address=SSD1306_I2C_ADDRESS,
-                 i2c=None):
+                 i2c=None, i2c_interface=None):
         # Call base class constructor.
         super(SSD1306_96_16, self).__init__(96, 16, rst, dc, sclk, din, cs,
-                                            gpio, spi, i2c_bus, i2c_address, i2c)
+                                            gpio, spi, i2c_bus, i2c_address, i2c, i2c_interface)
         self._mux_ratio = 0x0F
 
     def _initialize(self):
